@@ -7,8 +7,7 @@ from hyperopt import fmin, tpe, hp
 import hyperopt
 
 
-problem = "Pendulum-v1"
-env = gym.make(problem)
+env = gym.make('LunarLanderContinuous-v2')
 
 num_states = env.observation_space.shape[0]
 print("Size of State Space ->  {}".format(num_states))
@@ -144,7 +143,7 @@ def get_actor(hidden_layers_shape):
     inputs = layers.Input(shape=(num_states,))
     out = layers.Dense(hidden_layers_shape[0], activation="relu")(inputs)
     out = layers.Dense(hidden_layers_shape[1], activation="relu")(out)
-    outputs = layers.Dense(1, activation="tanh", kernel_initializer=last_init)(out)
+    outputs = layers.Dense(num_actions, activation="tanh", kernel_initializer=last_init)(out)
 
     # Our upper bound is 2.0 for Pendulum.
     outputs = outputs * upper_bound
@@ -174,24 +173,19 @@ def get_critic(hidden_layers_shape):
 
     return model
     
-def policy(state, noise_object,epsilon):
+def policy(actor_model, state, noise_object):
     sampled_actions = tf.squeeze(actor_model(state))
     noise = noise_object()
     # Adding noise to action
-    sampled_actions = sampled_actions.numpy() + epsilon*noise*0
+    sampled_actions = sampled_actions.numpy() + noise
 
     # We make sure action is within bounds
     legal_action = np.clip(sampled_actions, lower_bound, upper_bound)
 
-    return [np.squeeze(legal_action)]
-
-
-
-
-
+    return np.squeeze(legal_action)
 
 #held constant through auto hyperparameter optimization
-total_episodes = 100
+total_episodes = 1000
 
 # Learning rate for actor-critic models
 critic_lr = 0.002
@@ -207,9 +201,6 @@ hidden_layers_shape = (400,300)
 buffer_size = 50000
 batch_size = 64
 
-epsilon = 1
-min_epsilon = 0.01
-
 noise_std_dev = 0.2
 
 # To store reward history of each episode
@@ -223,7 +214,6 @@ def loss_given_hyperparams():
     #actor_lr = params['actor_lr']
     #critic_lr = params['critic_lr']
     #gamma = params['gamma']
-    #noise_std_dev = params['noise_std_dev']
 
     ep_reward_list = []
     # To store average reward history of last few episodes
@@ -245,14 +235,12 @@ def loss_given_hyperparams():
     # Making the weights equal initially
     target_actor.set_weights(actor_model.get_weights())
     target_critic.set_weights(critic_model.get_weights())
+    
 
     ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(noise_std_dev) * np.ones(1))
     # Takes about 4 min to train
     for ep in range(total_episodes):
 
-        global epsilon
-        epsilon -= (epsilon/10)
-        epsilon = np.maximum(min_epsilon,epsilon)
         prev_state = env.reset()
         episodic_reward = 0
 
@@ -263,7 +251,7 @@ def loss_given_hyperparams():
 
             tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state), 0)
 
-            action = policy(tf_prev_state, ou_noise, epsilon)
+            action = policy(actor_model, tf_prev_state, ou_noise)
             # Recieve state and reward from environment.
             state, reward, done, info = env.step(action)
 
@@ -284,7 +272,7 @@ def loss_given_hyperparams():
         ep_reward_list.append(episodic_reward)
 
         # Mean of last 40 episodes
-        avg_reward = -np.mean(ep_reward_list[-40:])
+        avg_reward = np.mean(ep_reward_list[-40:])
         print("Episode * {} * Avg Reward is ==> {}".format(ep, avg_reward))
         avg_reward_list.append(avg_reward)
 

@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from hyperopt import fmin, tpe, hp
 import hyperopt
+from param_noise import *
 
 
 problem = "Pendulum-v1"
@@ -175,10 +176,10 @@ def get_critic(hidden_layers_shape):
     return model
     
 def policy(state, noise_object,epsilon):
-    sampled_actions = tf.squeeze(actor_model(state))
+    sampled_actions = tf.squeeze(perturbed_actor(state))
     noise = noise_object()
     # Adding noise to action
-    sampled_actions = sampled_actions.numpy() + epsilon*noise*0
+    sampled_actions = sampled_actions.numpy() + epsilon*noise
 
     # We make sure action is within bounds
     legal_action = np.clip(sampled_actions, lower_bound, upper_bound)
@@ -186,6 +187,58 @@ def policy(state, noise_object,epsilon):
     return [np.squeeze(legal_action)]
 
 
+class AdaptiveParamNoiseSpec(object):
+    def __init__(self, initial_stddev=0.1, desired_action_stddev=0.2, adaptation_coefficient=1.01):
+        """
+        Note that initial_stddev and current_stddev refer to std of parameter noise,
+        but desired_action_stddev refers to (as name notes) desired std in action space
+        """
+        self.initial_stddev = initial_stddev
+        self.desired_action_stddev = desired_action_stddev
+        self.adaptation_coefficient = adaptation_coefficient
+
+        self.current_stddev = initial_stddev
+
+    def adapt(self, distance):
+        if distance > self.desired_action_stddev:
+            # Decrease stddev.
+            self.current_stddev /= self.adaptation_coefficient
+        else:
+            # Increase stddev.
+            self.current_stddev *= self.adaptation_coefficient
+
+    def get_stats(self):
+        stats = {
+            'param_noise_stddev': self.current_stddev,
+        }
+        return stats
+
+    def __repr__(self):
+        fmt = 'AdaptiveParamNoiseSpec(initial_stddev={}, desired_action_stddev={}, adaptation_coefficient={})'
+        return fmt.format(self.initial_stddev, self.desired_action_stddev, self.adaptation_coefficient)
+
+
+def perturb_actor_parameters():
+    """Apply parameter noise to actor model, for exploration"""
+    global actor_perturbed
+    actor_perturbed.set_weights(actor_model.get_weights())
+    params = perturbed_actor.state_dict()
+      for name in params:
+           if 'ln' in name:
+                pass
+            param = params[name]
+            random = torch.randn(param.shape)
+            param += random * param_noise.current_stddev
+
+#find out how these funcitons oppose/compliment each other
+@tf.function
+def update_perturbed_actor(actor, perturbed_actor, param_noise_stddev):
+
+    for var, perturbed_var in zip(actor.variables, perturbed_actor.variables):
+        if var in actor.perturbable_vars:
+            perturbed_var.assign(var + tf.random.normal(shape=tf.shape(var), mean=0., stddev=param_noise_stddev))
+        else:
+            perturbed_var.assign(var)
 
 
 
@@ -218,12 +271,12 @@ critic_optimizer = tf.keras.optimizers.Adam(learning_rate=critic_lr)
 actor_optimizer = tf.keras.optimizers.Adam(learning_rate=actor_lr)
 
 
-def loss_given_hyperparams():
-    #tau = params['tau']
-    #actor_lr = params['actor_lr']
-    #critic_lr = params['critic_lr']
-    #gamma = params['gamma']
-    #noise_std_dev = params['noise_std_dev']
+def loss_given_hyperparams(params):
+    tau = params['tau']
+    actor_lr = params['actor_lr']
+    critic_lr = params['critic_lr']
+    gamma = params['gamma']
+    noise_std_dev = params['noise_std_dev']
 
     ep_reward_list = []
     # To store average reward history of last few episodes
@@ -232,12 +285,16 @@ def loss_given_hyperparams():
     buffer = Buffer(buffer_size, batch_size)
 
     global actor_model
+    global perturbed_actor
     global critic_model
     global target_actor
     global target_critic
 
     actor_model = get_actor(hidden_layers_shape)
     critic_model = get_critic(hidden_layers_shape)
+
+    #add parameter noise to actor
+    perturbed_actor = perturb_actor_parameters()
 
     target_actor = get_actor(hidden_layers_shape)
     target_critic = get_critic(hidden_layers_shape)
@@ -246,15 +303,17 @@ def loss_given_hyperparams():
     target_actor.set_weights(actor_model.get_weights())
     target_critic.set_weights(critic_model.get_weights())
 
-    ou_noise = OUActionNoise(mean=np.zeros(1), std_deviation=float(noise_std_dev) * np.ones(1))
+    param_noise = AdaptiveParamNoiseSpec(initial_stddev=0.05,desired_action_stddev=0.3, adaptation_coefficient=1.05)
+
     # Takes about 4 min to train
     for ep in range(total_episodes):
 
-        global epsilon
-        epsilon -= (epsilon/10)
+        epsilon -= (epsilon/EXPLORE)
         epsilon = np.maximum(min_epsilon,epsilon)
         prev_state = env.reset()
         episodic_reward = 0
+
+        perturbed_actor = perturb_actor_parameters()
 
         while True:
             # Uncomment this to see the Actor in action
@@ -304,4 +363,4 @@ def calculate_optimal_params():
     print(best)
     print(hyperopt.space_eval(params, best))
 
-loss_given_hyperparams()
+calculate_optimal_params()
